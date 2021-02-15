@@ -1,0 +1,365 @@
+---
+title: " scMoC: Single-Cell Multi-omics clustering "
+output: html_notebook
+---
+R Notebook, showing the functionality of the scMoC for clustering multi-omics data specifically for scRNA-seq data and scATAC-seq data for paired datasets (i.e. measured for exact same cell). This notebook used sci-CAR data for Mouse kideny as example to work on. Other notebooks shows the same flow on different datasets. 
+
+### 1- Let's start 
+We start with loading the scMoC functions as well as libraries needed to process this notebook
+
+```{r}
+# Load dependencies
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(Seurat,dplyr,patchwork,repr,Matrix,qdapTools,FNN,
+               ggplot2,gplots,broman,BiocManager,limma,mclust,
+               cluster,OmicsMarkeR,abind,corrplot,svglite,EnhancedVolcano)
+source("R/scmoc.R")
+marker_genes <- read.csv("R/marker_genes_list.csv",header = FALSE,stringsAsFactors=FALSE)
+
+white <- brocolors("crayons")["White"]
+blue <- brocolors("crayons")["Cerulean"]
+my_palette<- colorRampPalette(c(white,blue))(n=100)
+```
+
+Some globale variable definitions 
+```{r}
+# sci-CAR Variables 
+MinCellsGenes = 3
+MinFeat       = 200
+MinCellsPeaks = 3
+N_PCs         = 20
+N_Neighbours  = 50
+Max_N_PCs     = 20
+impute_NN     = 50
+N_PC	      = 20
+N_LSI	      = 20
+RNA_clusters_res  = 0.8 
+ATAC_clusters_res = 0.8
+```
+
+
+### 2- Load the data files
+
+Read the sci-CAR data (The files can be downloaded from https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE117089)
+```{r}
+##------------- Reading Raw Files -------------------------------------------------------
+print ("Reading RNA files", quote=FALSE)
+
+rna_count_data  <- read.csv("GSM3271044_RNA_mouse_kidney_gene_count.txt",header = FALSE,skip = 2,sep = " ")
+print (c("RNA Files -> Count data: ",nrow(rna_count_data)), quote=FALSE)
+
+rna_cell_data <- read.csv("GSM3271044_RNA_mouse_kidney_cell.txt", header=TRUE)
+print (c("RNA Files -> Count data: ",nrow(rna_cell_data)), quote=FALSE)
+
+rna_gene_data <- read.csv("GSM3271044_RNA_mouse_kidney_gene.txt",header = TRUE)
+print (c("RNA Files -> Count data: ",nrow(rna_gene_data)), quote=FALSE)
+
+tmp_rna <- matrix(0L, nrow = nrow(rna_gene_data),ncol = nrow(rna_cell_data))
+
+print(c("Creating Zero Matrix with dim : ", dim(tmp_rna)),quote = FALSE)
+
+for (i in 1:nrow(rna_count_data)){
+  tmp_rna[rna_count_data[i,1],rna_count_data[i,2]] =  rna_count_data[i,3]
+  }
+print(c("RNA Files -> Data Sparsity = ", round(
+  nrow(rna_count_data)*100/(nrow(rna_cell_data) * nrow(rna_gene_data)),2),"%"),quote=FALSE)
+
+rna_sparce_mat <- Matrix(tmp_rna, sparse = TRUE)
+colnames(rna_sparce_mat) <- rna_cell_data[,1]
+rownames(rna_sparce_mat) <- rna_gene_data[,3]
+
+
+## Reading ATAC files 
+print ("Reading ATAC files", quote=FALSE)
+
+atac_count_data  <- read.csv("GSM3271045_ATAC_mouse_kidney_peak_count.txt",header = FALSE,skip = 2,sep = " ")
+print (c("ATAC Files -> Count data: ",nrow(atac_count_data)), quote=FALSE)
+
+atac_cell_data <- read.csv("GSM3271045_ATAC_mouse_kidney_cell.txt", header=TRUE)
+print (c("ATAC Files -> Count data: ",nrow(atac_cell_data)), quote=FALSE)
+
+atac_gene_data <- read.csv("GSM3271045_ATAC_mouse_kidney_peak.txt",header = TRUE)
+print (c("ATAC Files -> Count data: ",nrow(atac_gene_data)), quote=FALSE)
+
+tmp_atac <- matrix(0L, nrow = nrow(atac_gene_data),ncol = nrow(atac_cell_data))
+print(c("Creating Zero Matrix with dim : ", dim(tmp_atac)),quote = FALSE)
+
+for (i in 1:nrow(atac_count_data)){
+  tmp_atac[atac_count_data[i,1],atac_count_data[i,2]] =  atac_count_data[i,3]
+  }
+  
+print(c("ATAC Files -> Data Sparsity = ", round(
+  nrow(atac_count_data)*100/(nrow(atac_cell_data) * nrow(atac_gene_data)),2),"%"),quote=FALSE)
+
+atac_sparce_mat <- Matrix(tmp_atac, sparse = TRUE)
+colnames(atac_sparce_mat) <- atac_cell_data[,1]
+rownames(atac_sparce_mat) <- atac_gene_data[,3]
+
+
+## Find The Common Cells and Create Seurat Objects 
+
+# Finding the Common Cells 
+common_cells <-intersect(colnames(rna_sparce_mat), colnames(atac_sparce_mat))
+
+# Creat Seuart Object for RNA
+rna <- CreateSeuratObject(count=rna_sparce_mat[,common_cells], project = "sciCAR",
+                            min.cells = MinCellsGenes, min.features = MinFeat)
+
+# Creat Seurat Object for ATAC
+atac <- CreateSeuratObject(count=atac_sparce_mat[,common_cells], project = "sciCAR",
+                             min.cells = MinCellsPeaks)
+
+
+  
+```
+
+### 3- Quality Control Step 
+Visualize QC metrics as a violin plot for RNA data 
+```{r}
+#Calculate the percentage of Mitrocondrial genes in the cell 
+rna[["percent.mt"]] <- PercentageFeatureSet(rna, pattern = "^mt-")
+
+# Visualize QC metrics as a violin plot for RNA data 
+VlnPlot(rna, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+```
+
+```{r}
+plot1 <- FeatureScatter(rna, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(rna, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1+plot2
+```
+
+Visualize QC metrics as a violin plot for ATAC data 
+```{r}
+# Visualize QC metrics as a violin plot
+VlnPlot(atac, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2)
+```
+
+
+According to the figures we set the thresholds of the data as follows : 
+
+First for RNA: 
+
+1- Remove cells that contains more than 30% Mito Data
+
+2- Remove cells that have less than 200 different genes [almost empty cells]
+
+3- Remove cells that have more than 2500 different genes[noisy cells]
+      
+```{r}
+rna <- subset(rna, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 30)
+```
+Second for ATAC
+
+1- Remove cells that have less than 4000 different peaks [almost empty cells]
+
+2- Remove cells that have more than 10000 different peaks[noisy cells]
+
+```{r}
+atac <- subset(atac, subset = nFeature_RNA < 4000 & nCount_RNA < 10000 )
+```
+
+Select only common cells that passes both QC task
+```{r}
+common_cells <-intersect(colnames(rna), colnames(atac))
+rna <- rna[,common_cells]
+atac <- atac[,common_cells]
+```
+
+
+
+### 4- Process the RNA data 
+```{r}
+# 1- Normailize
+print("RNA Data: Making Normailization")
+rna <- NormalizeData(rna, normalization.method = "LogNormalize", scale.factor = 10000)
+
+# 2- Select Top variable genes 
+print("RNA Data: Finding Top Variable Genes")
+rna <- FindVariableFeatures(rna, selection.method = "vst", nfeatures = 6000)
+
+# 3- Do the processing 
+print("RNA Data: Going to Processing function ")
+rna <- process.object(rna,do_scaling = TRUE)
+
+# 4- Do PCA on the highly Variable genes only 
+print("RNA Data: Going to Processing function ")
+rna <- RunPCA(rna, features = VariableFeatures(object = rna))
+
+# 5- Cluster the RNA data 
+rna <- FindNeighbors(rna, dims = 1:N_PCs,k.param=N_Neighbours)
+rna <- FindClusters(rna, resolution = RNA_clusters_res,algorithm = 1)
+
+# 6- Project to the UMAP 
+rna <- RunUMAP(rna, dims = 1:N_PCs)
+options(repr.plot.width=6 , repr.plot.height=6)
+DimPlot(rna, reduction = "umap",pt.size = 0.25, label = TRUE, label.size = 8)  + NoLegend()
+
+```
+
+
+### 5- Process the ATAC data
+```{r}
+# 1- Normailize
+print("ATAC Data: Making Normailization")
+atac <- NormalizeData(atac, normalization.method = "LogNormalize", scale.factor = 10000)
+# 2- Do the processing 
+print("ATAC Data: Going to Processing function ")
+atac <- process.object(atac,do_scaling = TRUE, do_PCA = TRUE, do_LSI = TRUE)
+
+
+# 3 - Cluster the ATAC data 
+atac <- FindNeighbors(atac, dims = 1:N_PCs,k.param=N_Neighbours,reduction ='lsi' )
+atac <- FindClusters(atac, resolution = ATAC_clusters_res,algorithm = 1)
+table(atac$seurat_clusters)
+
+
+#Copy the clustering output to another meta data location to avoid overwritting 
+atac$seurat_clusters_lsi <- atac$seurat_clusters
+
+# 4- Project to the UMAP 
+atac <- RunUMAP(atac, dims = 1:N_PCs,reduction = "lsi")
+DimPlot(atac, reduction = "umap",pt.size = 0.25, label = TRUE, label.size = 8)  + NoLegend()
+
+# 5- Re-color the ATAC UMAP with the RNA cluster
+
+atac$orig_clusters <- atac$seurat_clusters
+atac@active.ident<- rna$seurat_clusters
+
+# Plot the UMAP 
+DimPlot(atac, reduction = "umap",pt.size = 0.25, label = TRUE, label.size = 8)  + NoLegend()
+atac$active.ident <- atac$orig_clusters
+```
+
+### 6- Impute ATAC data using RNA-guided imputation
+
+```{r}
+# 1- Do imputation 
+pca_embeed <- Embeddings(rna)
+out =knn.index(pca_embeed, k=impute_NN)
+
+print("ATAC RNA-PCA Impute: Doing the imputation ")
+atac_impute <- GetAssayData(atac)                    #Create zero array with the same dim. of the data
+atac_data <- GetAssayData(atac)
+
+atac_impute <- do.imputation(out,atac_data,atac_impute)
+
+# 2 - Do processing 
+print("ATAC RNA-PCA Impute: Going to Processing function ")
+atac_rna_guided <- CreateSeuratObject(count=atac_impute, project = "sciCAR")
+atac_rna_guided<- process.object(atac2, do_scaling = TRUE, do_PCA = TRUE, do_LSI = TRUE)
+
+# 3- Measure Data sparsity 
+x= sum(GetAssayData(atac_rna_guided$RNA)!=0)/ncol(atac_rna_guided)
+y = 100/nrow(atac_rna_guided)
+x*y
+
+# 4- Cluster the RNA-guided imputed ATAC data 
+
+atac_rna_guided <- FindNeighbors(atac_rna_guided, dims = 1:N_PCs,k.param=N_Neighbours,reduction ='lsi' )
+atac_rna_guided <- FindClusters(atac_rna_guided, resolution = ATAC_clusters_res,algorithm = 1)
+
+
+#Copy the clustering output to another meta data location to avoid overwritting 
+atac_rna_guided$seurat_clusters_lsi <- atac_rna_guided$seurat_clusters
+
+atac_rna_guided <- RunUMAP(atac_rna_guided, dims = 1:N_PCs,reduction = "lsi")
+# 5- Draw the UMAP
+DimPlot(atac_rna_guided, reduction = "umap",pt.size = 0.25, label = TRUE, label.size = 8)  + NoLegend()
+
+# 6- Recolor the RNA-guided imputed ATAC data with the RNA cluster
+atac_rna_guided$orig_clusters <- atac_rna_guided$seurat_clusters
+atac_rna_guided@active.ident<- rna$orig_clusters
+
+DimPlot(atac_impute, reduction = "umap",pt.size = 0.25, label = TRUE, label.size = 8)  + NoLegend()
+
+```
+
+
+### 7- Fine Tune the Clusters 
+This is the Second major step of scMoC after imputing the Data , we fine tune the clusters
+
+```{r}
+splitting<-which(rna_atac_impute_table> 0.1 & rna_atac_impute_table<0.9,arr.ind = TRUE)
+
+# add a col. for the new cluster information
+splitting<-cbind(splitting,NA)
+colnames(splitting)[3]<-'New_cluster'
+
+rna@active.ident<-rna$orig_clusters
+rna_tmp <- as.numeric(rna$orig_clusters)
+atac_tmp <- as.numeric(atac_impute$orig_clusters)
+for (i in 1: nrow(splitting))
+    {
+    new_lvl <- max(as.numeric(rna$orig_clusters)) + i -1
+    rna@active.ident <- factor(rna@active.ident,levels = c(levels(rna@active.ident),new_lvl))
+    rna@active.ident[intersect(which(rna_tmp == splitting[i,1]),which(atac_tmp==splitting[i,2]))] <- as.factor(new_lvl)
+        splitting[i,3]<-new_lvl
+}
+
+#calc. the Distances to every cluster
+dims <- 1:N_PCs
+dist.matrix <-dist(x = Embeddings(object = rna[['pca']])[, dims], upper = TRUE, diag = TRUE)
+tmp_dist <- as.matrix(dist.matrix)
+cluster_dist <- matrix(0,ncol = max(as.numeric(rna@active.ident)),nrow = nrow(tmp_dist))
+for (i in 1 : max(as.numeric(rna@active.ident)))
+{
+    cluster_dist[,i] <- apply(tmp_dist[rna@active.ident==(i-1),],2,mean)
+}
+
+#itterate over the clusters 
+for (i in 1:max(rna_tmp))
+    {
+    # Check if the cluster has been split or not 
+    tmp_splitting = splitting[which(splitting[,'row']==i),]
+    if (length(tmp_splitting)>3)            # Has more than 1 reading 
+        {
+        print(i)
+        tmp_cluster = apply(cluster_dist[rna@active.ident == (i-1),tmp_splitting[,3]],1,which.min)
+        final_cluster <- tmp_splitting[,3][tmp_cluster]
+        rna@active.ident[rna@active.ident == (i-1)] <- final_cluster
+        
+    }else if(length(tmp_splitting)>0)
+        {
+        final_cluster<- tmp_splitting[3]
+        rna@active.ident[rna@active.ident == (i-1)] <- final_cluster
+    }
+}
+
+# Sort the new clusters according to cluster size
+unsorted_table <- (table(rna@active.ident))
+sorted_table<-sort(unsorted_table [unsorted_table!=0] , decreasing = T)
+mapping_table <- rownames(as.matrix(sorted_table))
+mapping_table<- cbind(mapping_table,0:(length(mapping_table)-1))
+
+# Re-assign the cells to the new clusters 
+for (i in 1:length(rna@active.ident))
+    {
+    tmp_cell<-rna@active.ident[i]
+    rna@active.ident[i] <- mapping_table[which(mapping_table[,1] == tmp_cell),2]
+}
+#Setting the cluster numbers to the already used clusters only 
+
+rna@active.ident <- factor(rna@active.ident,levels = 0: (nrow(mapping_table)-1))
+
+
+
+# Draw the UMAP with the scMoC clusters colors 
+
+DimPlot(rna, reduction = "umap",pt.size = 0.25, label = TRUE, label.size = 8)  + NoLegend()
+
+```
+
+### 8- Biological interpuration for the scMoC clsuters
+
+```{r}
+rna.markers3 <- FindAllMarkers(rna, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+rna_maker_genes3<-rna.markers3%>% group_by(cluster) %>% top_n(n = N_genes, wt = avg_logFC)
+
+common_marker_genes_idx3<-intersect(marker_genes[,2],rna_maker_genes3$gene)
+myplot = DotPlot(rna,features = common_marker_genes_idx3
+        ,cols = c("gray", "blue")) +coord_flip()
+```
+
+
