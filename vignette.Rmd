@@ -33,6 +33,8 @@ Max_N_PCs     = 20
 impute_NN     = 50
 N_PC	      = 20
 N_LSI	      = 20
+N_genes       = 25 
+N_peaks       = 15
 RNA_clusters_res  = 0.8 
 ATAC_clusters_res = 0.8
 ```
@@ -248,7 +250,7 @@ atac_impute <- do.imputation(out,atac_data,atac_impute)
 # 2 - Do processing 
 print("ATAC RNA-PCA Impute: Going to Processing function ")
 atac_rna_guided <- CreateSeuratObject(count=atac_impute, project = "sciCAR")
-atac_rna_guided<- process.object(atac2, do_scaling = TRUE, do_PCA = TRUE, do_LSI = TRUE)
+atac_rna_guided<- process.object(atac_rna_guided, do_scaling = TRUE, do_PCA = TRUE, do_LSI = TRUE)
 
 # 3- Measure Data sparsity 
 x= sum(GetAssayData(atac_rna_guided$RNA)!=0)/ncol(atac_rna_guided)
@@ -270,9 +272,15 @@ DimPlot(atac_rna_guided, reduction = "umap",pt.size = 0.25, label = TRUE, label.
 
 # 6- Recolor the RNA-guided imputed ATAC data with the RNA cluster
 atac_rna_guided$orig_clusters <- atac_rna_guided$seurat_clusters
+rna$orig_clusters <- rna$seurat_clusters
 atac_rna_guided@active.ident<- rna$orig_clusters
 
-DimPlot(atac_impute, reduction = "umap",pt.size = 0.25, label = TRUE, label.size = 8)  + NoLegend()
+DimPlot(atac_rna_guided, reduction = "umap",pt.size = 0.25, label = TRUE, label.size = 8)  + NoLegend()
+
+
+# 7- Create contingency table between both data
+my_table_0 <- table(rna$seurat_clusters, atac_rna_guided$seurat_clusters)
+rna_atac_impute_table<- prop.table(my_table_0, margin = 1)   
 
 ```
 
@@ -289,7 +297,7 @@ colnames(splitting)[3]<-'New_cluster'
 
 rna@active.ident<-rna$orig_clusters
 rna_tmp <- as.numeric(rna$orig_clusters)
-atac_tmp <- as.numeric(atac_impute$orig_clusters)
+atac_tmp <- as.numeric(atac_rna_guided$orig_clusters)
 for (i in 1: nrow(splitting))
     {
     new_lvl <- max(as.numeric(rna$orig_clusters)) + i -1
