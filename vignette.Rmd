@@ -4,6 +4,7 @@ output: html_notebook
 ---
 R Notebook, showing the functionality of the scMoC for clustering multi-omics data specifically for scRNA-seq data and scATAC-seq data for paired datasets (i.e. measured for exact same cell). This notebook used sci-CAR data for Mouse kideny as example to work on. Other notebooks shows the same flow on different datasets. 
 
+
 ### 1- Let's start 
 We start with loading the scMoC functions as well as libraries needed to process this notebook
 
